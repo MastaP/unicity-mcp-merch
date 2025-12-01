@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node build/index.js",
     "dev": "tsc --watch",
-    "inspect": "npm run build && npx @modelcontextprotocol/inspector node build/index.js"
+    "inspect": "npm run build && (node build/index.js &) && sleep 2 && npx @modelcontextprotocol/inspector"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
