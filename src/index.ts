@@ -65,10 +65,10 @@ function loadProductImage(imageName: string): string | null {
 
 // Register all tools on an MCP server
 function registerTools(server: McpServer): void {
-  // Tool: List all products
+  // Tool: List all products with images
   server.tool(
     "list_products",
-    "List all available merchandise with prices and details",
+    "List all available merchandise with prices, details, and images",
     {
       category: z
         .enum(["t-shirt", "mug", "hoodie", "cap"])
@@ -82,31 +82,32 @@ function registerTools(server: McpServer): void {
         products = products.filter((p) => p.category === category);
       }
 
-      const productList = products.map((p) => ({
-        id: p.id,
-        name: p.name,
-        description: p.description,
-        category: p.category,
-        price: formatUCT(p.price),
-        sizes: p.sizes || null,
-        inStock: p.inStock,
-      }));
+      const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                products: productList,
-                note: "Use get_product to see product image, or place_order to purchase.",
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      for (const p of products) {
+        content.push({
+          type: "text" as const,
+          text: `**${p.name}** (${p.id})\n${p.description}\nPrice: ${formatUCT(p.price)}${p.sizes ? `\nSizes: ${p.sizes.join(", ")}` : ""}\nIn Stock: ${p.inStock ? "Yes" : "No"}\n`,
+        });
+
+        const imageBase64 = loadProductImage(p.image);
+        if (imageBase64) {
+          const ext = p.image.toLowerCase();
+          const mimeType = ext.endsWith(".png") ? "image/png" : "image/jpeg";
+          content.push({
+            type: "image" as const,
+            data: imageBase64.split(",")[1],
+            mimeType,
+          });
+        }
+      }
+
+      content.push({
+        type: "text" as const,
+        text: "\nUse place_order to purchase.",
+      });
+
+      return { content };
     }
   );
 
