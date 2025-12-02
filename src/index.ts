@@ -51,14 +51,18 @@ function cleanUnicityId(unicityId: string): string {
 function loadProductImage(imageName: string): string | null {
   try {
     const imagePath = path.join(config.assetsDir, imageName);
+    console.error(`[loadProductImage] Looking for image: ${imagePath}`);
     if (!fs.existsSync(imagePath)) {
+      console.error(`[loadProductImage] File not found: ${imagePath}`);
       return null;
     }
     const imageBuffer = fs.readFileSync(imagePath);
     const ext = path.extname(imageName).toLowerCase();
     const mimeType = ext === ".png" ? "image/png" : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
+    console.error(`[loadProductImage] Loaded ${imageName} (${imageBuffer.length} bytes, ${mimeType})`);
     return `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
-  } catch {
+  } catch (err) {
+    console.error(`[loadProductImage] Error loading ${imageName}:`, err);
     return null;
   }
 }
@@ -119,10 +123,12 @@ function registerTools(server: McpServer): void {
       product_id: z.string().describe("Product ID (e.g., 'tshirt-black', 'mug-classic')"),
     },
     async ({ product_id }) => {
+      console.error(`[get_product] Called with product_id: ${product_id}`);
       const product = PRODUCTS[product_id];
 
       if (!product) {
         const availableIds = Object.keys(PRODUCTS).join(", ");
+        console.error(`[get_product] Product not found. Available: ${availableIds}`);
         return {
           content: [
             {
@@ -134,6 +140,7 @@ function registerTools(server: McpServer): void {
         };
       }
 
+      console.error(`[get_product] Found product: ${product.name}, image: ${product.image}`);
       const imageBase64 = loadProductImage(product.image);
 
       const productInfo = {
@@ -147,6 +154,8 @@ function registerTools(server: McpServer): void {
       };
 
       if (imageBase64) {
+        const ext = product.image.toLowerCase();
+        const mimeType = ext.endsWith(".png") ? "image/png" : "image/jpeg";
         return {
           content: [
             {
@@ -156,7 +165,7 @@ function registerTools(server: McpServer): void {
             {
               type: "image" as const,
               data: imageBase64.split(",")[1],
-              mimeType: "image/png",
+              mimeType,
             },
           ],
         };
@@ -599,6 +608,15 @@ async function main() {
   await nostrService.connect();
 
   await startHttpServer(config.httpPort);
+
+  // Check assets directory
+  console.error(`  Assets dir: ${config.assetsDir}`);
+  if (fs.existsSync(config.assetsDir)) {
+    const files = fs.readdirSync(config.assetsDir);
+    console.error(`  Assets found: ${files.length > 0 ? files.join(", ") : "(none)"}`);
+  } else {
+    console.error(`  WARNING: Assets directory does not exist!`);
+  }
 
   console.error("=".repeat(60));
   console.error("Sphere Merch MCP Server is ready!");
