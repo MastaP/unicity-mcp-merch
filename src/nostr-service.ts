@@ -47,78 +47,119 @@ export class NostrService {
   async connect(): Promise<void> {
     if (this.connected) return;
 
+    console.error(`[NostrService] Initializing connection to ${this.config.relayUrl}...`);
+
     const identity = this.identityService.getIdentity();
     const secretKey = Buffer.from(identity.privateKeyHex, "hex");
     this.keyManager = NostrKeyManager.fromPrivateKey(secretKey);
+    console.error(`[NostrService] KeyManager created, pubkey: ${this.keyManager.getPublicKeyHex()}`);
+
     this.client = new NostrClient(this.keyManager);
+    console.error(`[NostrService] NostrClient created, connecting...`);
 
     await this.client.connect(this.config.relayUrl);
     this.connected = true;
+    console.error(`[NostrService] Connected to relay: ${this.config.relayUrl}`);
 
     this.subscribeToPayments();
 
-    console.error(`Nostr service connected to: ${this.config.relayUrl}`);
-    console.error(`MCP pubkey: ${this.keyManager.getPublicKeyHex()}`);
+    console.error(`[NostrService] ========================================`);
+    console.error(`[NostrService] Nostr service READY`);
+    console.error(`[NostrService] Relay: ${this.config.relayUrl}`);
+    console.error(`[NostrService] MCP pubkey: ${this.keyManager.getPublicKeyHex()}`);
+    console.error(`[NostrService] ========================================`);
   }
 
   private subscribeToPayments(): void {
     if (!this.client || !this.keyManager) return;
 
     const myPubkey = this.keyManager.getPublicKeyHex();
+    console.error(`[NostrService] Setting up payment subscription for pubkey: ${myPubkey}`);
 
     const filter = Filter.builder()
       .kinds(EventKinds.TOKEN_TRANSFER)
       .pTags(myPubkey)
       .build();
 
+    console.error(`[NostrService] Payment filter: ${JSON.stringify(filter.toJSON())}`);
+
     this.client.subscribe(filter, {
       onEvent: (event: Event) => {
+        console.error(`[NostrService] Received event kind=${event.kind} id=${event.id.slice(0, 16)}...`);
         this.handleIncomingTransfer(event).catch((err) => {
-          console.error("Error handling incoming transfer:", err);
+          console.error("[NostrService] Error handling incoming transfer:", err);
         });
+      },
+      onEndOfStoredEvents: (subId) => {
+        console.error(`[NostrService] EOSE received for payment subscription ${subId}`);
       },
     });
 
-    console.error("Subscribed to incoming token transfers");
+    console.error("[NostrService] Subscribed to incoming token transfers");
   }
 
   private async handleIncomingTransfer(event: Event): Promise<void> {
     if (!this.keyManager) return;
 
+    console.error(`[NostrService] ========================================`);
+    console.error(`[NostrService] INCOMING TRANSFER EVENT`);
+    console.error(`[NostrService]   - Event ID: ${event.id}`);
+    console.error(`[NostrService]   - Kind: ${event.kind}`);
+    console.error(`[NostrService]   - Created: ${new Date(event.created_at * 1000).toISOString()}`);
+
     try {
       if (!TokenTransferProtocol.isTokenTransfer(event)) {
+        console.error(`[NostrService] Not a valid token transfer, skipping`);
         return;
       }
 
       const senderPubkey = TokenTransferProtocol.getSender(event);
       const replyToEventId = TokenTransferProtocol.getReplyToEventId(event);
 
-      console.error(`Received token transfer from ${senderPubkey.slice(0, 16)}... replyTo=${replyToEventId?.slice(0, 16) || "none"}`);
+      console.error(`[NostrService]   - Sender: ${senderPubkey}`);
+      console.error(`[NostrService]   - ReplyTo: ${replyToEventId || "none"}`);
+      console.error(`[NostrService]   - Pending payments count: ${this.pendingPayments.size}`);
 
       let pending: PendingPayment | undefined;
       let pendingKey: string | undefined;
 
+      // List all pending payments for debugging
+      if (this.pendingPayments.size > 0) {
+        console.error(`[NostrService] Current pending payments:`);
+        for (const [eventId, p] of this.pendingPayments) {
+          console.error(`[NostrService]     - ${eventId}: order=${p.orderId}, user=${p.unicityId}, pubkey=${p.userPubkey.slice(0, 16)}...`);
+        }
+      }
+
       if (replyToEventId) {
+        console.error(`[NostrService] Trying to match by replyToEventId: ${replyToEventId}`);
         pending = this.pendingPayments.get(replyToEventId);
         if (pending) {
           pendingKey = replyToEventId;
-          console.error(`Matched payment for order ${pending.orderId} via replyToEventId`);
+          console.error(`[NostrService] MATCHED via replyToEventId for order ${pending.orderId}`);
+        } else {
+          console.error(`[NostrService] No match by replyToEventId`);
         }
       }
 
       if (!pending) {
+        console.error(`[NostrService] Trying to match by sender pubkey: ${senderPubkey}`);
         for (const [key, p] of this.pendingPayments) {
           if (p.userPubkey === senderPubkey) {
             pending = p;
             pendingKey = key;
-            console.error(`Matched payment for order ${p.orderId} via sender pubkey`);
+            console.error(`[NostrService] MATCHED via sender pubkey for order ${p.orderId}`);
             break;
           }
+        }
+        if (!pending) {
+          console.error(`[NostrService] No match by sender pubkey`);
         }
       }
 
       if (!pending || !pendingKey) {
-        console.error("No matching pending payment found for this transfer");
+        console.error("[NostrService] No matching pending payment found for this transfer");
+        console.error(`[NostrService] ========================================`);
         return;
       }
 
@@ -273,19 +314,37 @@ export class NostrService {
     }
   }
 
-  async resolvePubkey(unicityId: string): Promise<string | null> {
+  async resolvePubkey(unicityId: string, maxRetries: number = 3): Promise<string | null> {
     if (!this.client) {
       throw new Error("Nostr client not connected");
     }
     const cleanId = unicityId.replace("@unicity", "").replace("@", "").trim();
-    console.error(`Resolving pubkey for nametag: "${cleanId}"`);
-    const pubkey = await this.client.queryPubkeyByNametag(cleanId);
-    if (pubkey) {
-      console.error(`Found pubkey for ${cleanId}: ${pubkey.slice(0, 16)}...`);
-    } else {
-      console.error(`No pubkey found for nametag "${cleanId}" (query timed out or no binding exists)`);
+    console.error(`[NostrService] Resolving pubkey for nametag: "${cleanId}"`);
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const startTime = Date.now();
+      console.error(`[NostrService] Attempt ${attempt}/${maxRetries}: queryPubkeyByNametag("${cleanId}")...`);
+
+      const pubkey = await this.client.queryPubkeyByNametag(cleanId);
+      const elapsed = Date.now() - startTime;
+
+      if (pubkey) {
+        console.error(`[NostrService] SUCCESS: Found pubkey for ${cleanId}: ${pubkey.slice(0, 16)}... (took ${elapsed}ms, attempt ${attempt})`);
+        return pubkey;
+      }
+
+      const isTimeout = elapsed >= 4900;
+      console.error(`[NostrService] Attempt ${attempt} failed: ${isTimeout ? 'TIMEOUT (5s)' : 'No matching events'} (${elapsed}ms)`);
+
+      if (attempt < maxRetries) {
+        const delay = 500 * attempt;
+        console.error(`[NostrService] Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
-    return pubkey;
+
+    console.error(`[NostrService] FAILED: No pubkey found for nametag "${cleanId}" after ${maxRetries} attempts`);
+    return null;
   }
 
   async sendPaymentRequest(
@@ -299,6 +358,15 @@ export class NostrService {
       throw new Error("Nostr client not connected");
     }
 
+    console.error(`[NostrService] ----------------------------------------`);
+    console.error(`[NostrService] Sending payment request`);
+    console.error(`[NostrService]   - To: ${unicityId} (${userPubkey.slice(0, 16)}...)`);
+    console.error(`[NostrService]   - Order: ${orderId}`);
+    console.error(`[NostrService]   - Amount: ${amount}`);
+    console.error(`[NostrService]   - CoinId: ${this.config.coinId}`);
+    console.error(`[NostrService]   - Recipient nametag: ${this.config.nametag}`);
+    console.error(`[NostrService]   - Message: ${message}`);
+
     const eventId = await this.client.sendPaymentRequest(userPubkey, {
       amount,
       coinId: this.config.coinId,
@@ -306,9 +374,7 @@ export class NostrService {
       message,
     });
 
-    console.error(
-      `Sent payment request to ${unicityId} for order ${orderId} amount ${amount} (eventId: ${eventId.slice(0, 16)}...)`
-    );
+    console.error(`[NostrService] Payment request sent! EventId: ${eventId}`);
 
     this.orderService.linkPaymentToOrder(eventId, orderId);
 
@@ -330,7 +396,9 @@ export class NostrService {
       resolve: resolvePayment!,
     };
     this.pendingPayments.set(eventId, pending);
-    console.error(`Registered pending payment for eventId ${eventId.slice(0, 16)}...`);
+    console.error(`[NostrService] Registered pending payment for eventId ${eventId.slice(0, 16)}...`);
+    console.error(`[NostrService] Total pending payments: ${this.pendingPayments.size}`);
+    console.error(`[NostrService] ----------------------------------------`);
 
     // Set up timeout
     const timeoutId = setTimeout(() => {
