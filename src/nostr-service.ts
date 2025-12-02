@@ -278,7 +278,14 @@ export class NostrService {
       throw new Error("Nostr client not connected");
     }
     const cleanId = unicityId.replace("@unicity", "").replace("@", "").trim();
-    return this.client.queryPubkeyByNametag(cleanId);
+    console.error(`Resolving pubkey for nametag: "${cleanId}"`);
+    const pubkey = await this.client.queryPubkeyByNametag(cleanId);
+    if (pubkey) {
+      console.error(`Found pubkey for ${cleanId}: ${pubkey.slice(0, 16)}...`);
+    } else {
+      console.error(`No pubkey found for nametag "${cleanId}" (query timed out or no binding exists)`);
+    }
+    return pubkey;
   }
 
   async sendPaymentRequest(
@@ -305,31 +312,76 @@ export class NostrService {
 
     this.orderService.linkPaymentToOrder(eventId, orderId);
 
+    // Create a deferred promise that can be resolved later
+    let resolvePayment: (success: boolean) => void;
+    const paymentPromise = new Promise<boolean>((resolve) => {
+      resolvePayment = resolve;
+    });
+
+    // Register pending payment IMMEDIATELY so incoming transfers can be matched
+    const pending: PendingPayment = {
+      eventId,
+      unicityId,
+      userPubkey,
+      orderId,
+      amount,
+      coinId: this.config.coinId,
+      createdAt: Date.now(),
+      resolve: resolvePayment!,
+    };
+    this.pendingPayments.set(eventId, pending);
+    console.error(`Registered pending payment for eventId ${eventId.slice(0, 16)}...`);
+
+    // Set up timeout
+    const timeoutId = setTimeout(() => {
+      if (this.pendingPayments.has(eventId)) {
+        console.error(`Payment timeout for eventId ${eventId.slice(0, 16)}...`);
+        this.pendingPayments.delete(eventId);
+        resolvePayment!(false);
+      }
+    }, this.config.paymentTimeoutSeconds * 1000);
+
     const waitForPayment = (): Promise<boolean> => {
-      return new Promise((resolve) => {
-        const pending: PendingPayment = {
-          eventId,
-          unicityId,
-          userPubkey,
-          orderId,
-          amount,
-          coinId: this.config.coinId,
-          createdAt: Date.now(),
-          resolve,
-        };
-
-        this.pendingPayments.set(eventId, pending);
-
-        setTimeout(() => {
-          if (this.pendingPayments.has(eventId)) {
-            this.pendingPayments.delete(eventId);
-            resolve(false);
-          }
-        }, this.config.paymentTimeoutSeconds * 1000);
+      return paymentPromise.then((result) => {
+        clearTimeout(timeoutId);
+        return result;
       });
     };
 
     return { eventId, waitForPayment };
+  }
+
+  /**
+   * Check if there's an existing pending payment for an order.
+   * Returns the eventId if found, null otherwise.
+   */
+  getPendingPaymentForOrder(orderId: string): string | null {
+    for (const [eventId, pending] of this.pendingPayments) {
+      if (pending.orderId === orderId) {
+        return eventId;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Wait for an existing pending payment by eventId.
+   * Returns a promise that resolves when payment is received or times out.
+   */
+  waitForExistingPayment(eventId: string): Promise<boolean> | null {
+    const pending = this.pendingPayments.get(eventId);
+    if (!pending) {
+      return null;
+    }
+
+    // Create a new promise that resolves when the pending payment resolves
+    return new Promise((resolve) => {
+      const originalResolve = pending.resolve;
+      pending.resolve = (success: boolean) => {
+        originalResolve(success);
+        resolve(success);
+      };
+    });
   }
 
   getPublicKey(): string {

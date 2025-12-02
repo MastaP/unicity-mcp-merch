@@ -365,18 +365,41 @@ function registerTools(server: McpServer): void {
         };
       }
 
-      // Resend payment request and wait
       const product = PRODUCTS[order.productId];
-      const message = `Order #${order.orderId}: ${order.quantity}x ${product?.name || order.productId}`;
-      const { waitForPayment } = await nostrService.sendPaymentRequest(
-        unicityId,
-        pubkey,
-        order.orderId,
-        order.totalPrice,
-        message
-      );
 
-      const paymentReceived = await waitForPayment();
+      // Check if there's already a pending payment for this order
+      const existingEventId = nostrService.getPendingPaymentForOrder(order.orderId);
+      let paymentReceived: boolean;
+
+      if (existingEventId) {
+        // Wait for existing pending payment
+        console.error(`Waiting for existing pending payment ${existingEventId.slice(0, 16)}... for order ${order.orderId}`);
+        const existingPromise = nostrService.waitForExistingPayment(existingEventId);
+        if (existingPromise) {
+          paymentReceived = await existingPromise;
+        } else {
+          // Pending payment was resolved between check and wait, re-check order status
+          const refreshedOrder = orderService.getOrder(order_id);
+          paymentReceived = refreshedOrder?.status === "paid";
+        }
+      } else {
+        // No existing pending payment - re-check order status in case payment arrived
+        const refreshedOrder = orderService.getOrder(order_id);
+        if (refreshedOrder?.status === "paid") {
+          paymentReceived = true;
+        } else {
+          // Send a new request
+          const message = `Order #${order.orderId}: ${order.quantity}x ${product?.name || order.productId}`;
+          const { waitForPayment } = await nostrService.sendPaymentRequest(
+            unicityId,
+            pubkey,
+            order.orderId,
+            order.totalPrice,
+            message
+          );
+          paymentReceived = await waitForPayment();
+        }
+      }
 
       if (paymentReceived) {
         return {
