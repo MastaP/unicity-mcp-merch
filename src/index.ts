@@ -256,9 +256,9 @@ function registerTools(server: McpServer): void {
       // Create order
       const order = orderService.createOrder(unicityId, product, quantity, size as TShirtSize | undefined);
 
-      // Send payment request
+      // Send payment request and wait for confirmation
       const message = `Order #${order.orderId}: ${quantity}x ${product.name}${size ? ` (${size})` : ""}`;
-      const { eventId } = await nostrService.sendPaymentRequest(
+      const { eventId, waitForPayment } = await nostrService.sendPaymentRequest(
         unicityId,
         pubkey,
         order.orderId,
@@ -266,28 +266,51 @@ function registerTools(server: McpServer): void {
         message
       );
 
+      console.error(`[place_order] Payment request sent for order ${order.orderId}, waiting for payment (timeout: ${config.paymentTimeoutSeconds}s)...`);
+
+      const paymentReceived = await waitForPayment();
+
+      if (paymentReceived) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  status: "paid",
+                  orderId: order.orderId,
+                  product: product.name,
+                  quantity,
+                  size: size || null,
+                  totalPrice: formatUCT(order.totalPrice),
+                  message: "Payment received! Your order is confirmed.",
+                  note: "We'll process your order and ship it soon.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify(
               {
-                status: "payment_required",
+                status: "payment_timeout",
                 orderId: order.orderId,
-                product: product.name,
-                quantity,
-                size: size || null,
-                totalPrice: formatUCT(order.totalPrice),
-                message: `Payment request sent to your wallet (@${unicityId}). Please approve the payment.`,
+                message: `Payment not received within ${config.paymentTimeoutSeconds} seconds. Please try again.`,
                 paymentRequestEventId: eventId,
-                timeoutSeconds: config.paymentTimeoutSeconds,
-                nextStep: `Use confirm_order with order_id "${order.orderId}" to wait for payment confirmation.`,
               },
               null,
               2
             ),
           },
         ],
+        isError: true,
       };
     }
   );
