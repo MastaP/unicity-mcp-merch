@@ -47,20 +47,22 @@ function cleanUnicityId(unicityId: string): string {
   return unicityId.replace("@unicity", "").replace("@", "").trim();
 }
 
-// Helper: Get product image URL
-function getProductImageUrl(imageName: string): string | null {
+// Helper: Load product image as base64
+function loadProductImage(imageName: string): string | null {
   try {
     const imagePath = path.join(config.assetsDir, imageName);
-    console.error(`[getProductImageUrl] Checking image: ${imagePath}`);
+    console.error(`[loadProductImage] Looking for image: ${imagePath}`);
     if (!fs.existsSync(imagePath)) {
-      console.error(`[getProductImageUrl] File not found: ${imagePath}`);
+      console.error(`[loadProductImage] File not found: ${imagePath}`);
       return null;
     }
-    const imageUrl = `${config.baseUrl}/assets/${imageName}`;
-    console.error(`[getProductImageUrl] Image URL: ${imageUrl}`);
-    return imageUrl;
+    const imageBuffer = fs.readFileSync(imagePath);
+    const ext = path.extname(imageName).toLowerCase();
+    const mimeType = ext === ".png" ? "image/png" : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
+    console.error(`[loadProductImage] Loaded ${imageName} (${imageBuffer.length} bytes, ${mimeType})`);
+    return `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
   } catch (err) {
-    console.error(`[getProductImageUrl] Error checking ${imageName}:`, err);
+    console.error(`[loadProductImage] Error loading ${imageName}:`, err);
     return null;
   }
 }
@@ -84,27 +86,32 @@ function registerTools(server: McpServer): void {
         products = products.filter((p) => p.category === category);
       }
 
-      const productList = products.map((p) => {
-        const imageUrl = getProductImageUrl(p.image);
-        return {
-          id: p.id,
-          name: p.name,
-          description: p.description,
-          price: formatUCT(p.price),
-          sizes: p.sizes || null,
-          inStock: p.inStock,
-          imageUrl,
-        };
+      const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+
+      for (const p of products) {
+        content.push({
+          type: "text" as const,
+          text: `**${p.name}** (${p.id})\n${p.description}\nPrice: ${formatUCT(p.price)}${p.sizes ? `\nSizes: ${p.sizes.join(", ")}` : ""}\nIn Stock: ${p.inStock ? "Yes" : "No"}\n`,
+        });
+
+        const imageBase64 = loadProductImage(p.image);
+        if (imageBase64) {
+          const ext = p.image.toLowerCase();
+          const mimeType = ext.endsWith(".png") ? "image/png" : "image/jpeg";
+          content.push({
+            type: "image" as const,
+            data: imageBase64.split(",")[1],
+            mimeType,
+          });
+        }
+      }
+
+      content.push({
+        type: "text" as const,
+        text: "\nUse place_order to purchase.",
       });
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ products: productList, note: "Use place_order to purchase." }, null, 2),
-          },
-        ],
-      };
+      return { content };
     }
   );
 
@@ -134,7 +141,7 @@ function registerTools(server: McpServer): void {
       }
 
       console.error(`[get_product] Found product: ${product.name}, image: ${product.image}`);
-      const imageUrl = getProductImageUrl(product.image);
+      const imageBase64 = loadProductImage(product.image);
 
       const productInfo = {
         id: product.id,
@@ -144,8 +151,25 @@ function registerTools(server: McpServer): void {
         price: formatUCT(product.price),
         sizes: product.sizes || null,
         inStock: product.inStock,
-        imageUrl,
       };
+
+      if (imageBase64) {
+        const ext = product.image.toLowerCase();
+        const mimeType = ext.endsWith(".png") ? "image/png" : "image/jpeg";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(productInfo, null, 2),
+            },
+            {
+              type: "image" as const,
+              data: imageBase64.split(",")[1],
+              mimeType,
+            },
+          ],
+        };
+      }
 
       return {
         content: [
@@ -600,8 +624,6 @@ async function main() {
   console.error(`  Relay: ${config.relayUrl}`);
   console.error(`  Products: ${Object.keys(PRODUCTS).length}`);
   console.error(`  HTTP port: ${config.httpPort}`);
-  console.error(`  Base URL: ${config.baseUrl}`);
-  console.error(`  Assets URL: ${config.baseUrl}/assets/`);
   console.error("=".repeat(60));
 }
 
@@ -627,9 +649,6 @@ async function startHttpServer(port: number): Promise<void> {
   });
 
   app.use(express.json());
-
-  // Serve static assets (product images)
-  app.use("/assets", express.static(config.assetsDir));
 
   // ===========================================
   // Legacy SSE Transport (for MCP Inspector)

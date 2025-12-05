@@ -27,9 +27,6 @@ export interface Config {
 
   // HTTP port for MCP transport
   httpPort: number;
-
-  // Base URL for serving static content (e.g., images)
-  baseUrl: string;
 }
 
 function generatePassword(): string {
@@ -76,6 +73,5 @@ export function loadConfig(): Config {
     assetsDir: process.env.ASSETS_DIR || "./assets",
     adminPassword,
     httpPort: parseInt(process.env.HTTP_PORT || "3001", 10),
-    baseUrl: process.env.BASE_URL || `http://localhost:${process.env.HTTP_PORT || "3001"}`,
   };
 }
